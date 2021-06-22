@@ -1,0 +1,163 @@
+---
+title: "GSE93272"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      smooth_scroll: true
+    code_folding: hide
+    number_sections: true
+    theme: lumen
+---
+
+# Background
+
+**Title:** Multi-omics monitoring of drug response in rheumatoid arthritis in pursuit of molecular remission.
+
+Este estudio consiste en una monitorización de la respuesta a fármacos de pacientes con AR mediante una aproximación multi-ómica en sangre periférica, con el fin de conocer las diferencias subyacentes a la remisión clínica sostenida de la enfermedad y el estado sano.
+
+```{r libraries, include=FALSE}
+library(Biobase)
+library(knitr)
+library(kableExtra)
+library(stringr)
+library(plotly)
+library(ggdendro)
+source("../Funciones/plotTreeEU.R")
+source("../Funciones/pcaGenesEU.r")
+```
+
+# Análisis exploratorio {.tabset}
+
+```{r load_data, include=FALSE}
+load("../../Data/GSEra1_final_selection.RData")
+palette = c("#67a9cf", "#ef8a62")
+# palette4 = c("#d7191c", "#fdae61", "#abd9e9", "#2c7bb6")
+palette4 = c("#abd9e9", "#2c7bb6", "#fcc6c2", "#f53629")
+```
+
+**Plataforma**: Affymetrix Human Genome U133 Plus 2.0 Array
+
+**Tissue**: Peripheral blood
+
+```{r GSE93272_muestras, echo=FALSE}
+muestras <- pData(GSE$GSE93272)
+expresion <- exprs(GSE$GSE93272)
+muestras <- muestras[,c("disease state:ch1", "gender:ch1", "age:ch1", "batch:ch1")]
+muestras$grupo <- apply(muestras[, c("disease state:ch1", "gender:ch1")], 1, function(x) {
+  if (str_detect(x[1], ".*control.*")){
+    ifelse (str_detect(x[2], ".*F.*"), "Control F", "Control M")
+  } else {
+    ifelse (str_detect(x[2], ".*F.*"), "RA F", "RA M")
+  }
+})
+
+tabla <- table(muestras$grupo)
+kable(tabla, col.names = c("Grupo", "Muestras"))
+```
+
+ 
+
+## Boxplot
+
+```{r GSE93272_boxplot, echo=FALSE}
+Muestras <- rep(colnames(expresion), each = dim(expresion)[1])
+Valores <- c()
+for (columna in colnames(expresion)) {
+  Valores <- c(Valores, expresion[,columna])
+}
+condicion <- rep(muestras$grupo, each = dim(expresion)[1])
+box_data <- data.frame(Muestras, Valores, condicion)
+
+fig <- plot_ly(box_data, y=~Valores, x =~Muestras, color=~condicion, type="box", colors=palette4) %>%
+  layout(title="GSE93272 boxplot")
+
+fig
+```
+
+## Boxplot batch
+
+```{r}
+Muestras <- rep(colnames(expresion), each = dim(expresion)[1])
+Valores <- c()
+for (columna in colnames(expresion)) {
+  Valores <- c(Valores, expresion[,columna])
+}
+condicion <- rep(as.factor(muestras$`batch:ch1`), each = dim(expresion)[1])
+box_data <- data.frame(Muestras, Valores, condicion)
+
+fig <- plot_ly(box_data, y=~Valores, x =~Muestras, color=~condicion, type="box", colors=palette) %>%
+  layout(title="GSE93272 boxplot (lote)")
+
+fig
+```
+
+## Clustering
+
+```{r GSE93272_clustering, echo=FALSE}
+correlacion <- cor(expresion)
+distancia <- as.dist((1-correlacion) / 2)
+cluster <- hclust(distancia)
+
+cluster$clase <- muestras$grupo
+
+fig <- plotTreeClust(cluster, title="GSE93272 clustering", palette = palette4)
+
+fig
+```
+
+## Clustering batch
+
+```{r}
+correlacion <- cor(expresion)
+distancia <- as.dist((1-correlacion) / 2)
+cluster <- hclust(distancia)
+
+cluster$clase <- as.factor(muestras$`batch:ch1`)
+
+fig <- plotTreeClust(cluster, title="GSE93272 clustering (lote)", palette = palette)
+
+fig
+```
+
+## PCA
+
+```{r GSE93272_pca, echo=FALSE}
+mi.pca <- pcaGenes(expresion)
+
+mi.pca.df <- as.data.frame(mi.pca$scores)
+mi.pca.df$grupo <- muestras$grupo
+mi.pca.df$var.exp <- round(mi.pca$var.exp * 100, 2)
+rownames(mi.pca.df) <- rownames(muestras)
+
+fig <- plot_ly(mi.pca.df,x=~V1,y=~V2, z=~V3, text=rownames(mi.pca.df),
+               color = ~grupo, colors=palette4)
+fig <- fig %>% add_markers(marker= list(size=3) )
+fig <- fig %>% layout(title="PCA, normalized data",
+                      scene = list(
+                        xaxis=list(title=paste0("PC1: ",mi.pca.df$var.exp[1],"% explained variance")),
+                        yaxis=list(title=paste0("PC2: ",mi.pca.df$var.exp[2],"% explained variance")),
+                        zaxis=list(title=paste0("PC3: ",mi.pca.df$var.exp[3],"% explained variance"))))
+fig
+```
+
+## PCA batch
+
+```{r}
+mi.pca <- pcaGenes(expresion)
+
+mi.pca.df <- as.data.frame(mi.pca$scores)
+mi.pca.df$grupo <- as.factor(muestras$`batch:ch1`)
+mi.pca.df$var.exp <- round(mi.pca$var.exp * 100, 2)
+rownames(mi.pca.df) <- rownames(muestras)
+
+fig <- plot_ly(mi.pca.df,x=~V1,y=~V2, z=~V3, text=rownames(mi.pca.df),
+               color = ~grupo, colors=palette)
+fig <- fig %>% add_markers(marker= list(size=3) )
+fig <- fig %>% layout(title="PCA, normalized data (batch)",
+                      scene = list(
+                        xaxis=list(title=paste0("PC1: ",mi.pca.df$var.exp[1],"% explained variance")),
+                        yaxis=list(title=paste0("PC2: ",mi.pca.df$var.exp[2],"% explained variance")),
+                        zaxis=list(title=paste0("PC3: ",mi.pca.df$var.exp[3],"% explained variance"))))
+fig
+```

@@ -1,0 +1,94 @@
+---
+title: "Mapeo Identificadores"
+date: "3/16/2021"
+output: html_document
+---
+
+Microarrays: Buscar el paquete asociado a la plataforma: entrar en la plataforma en GEOdatabase, a veces aparece entre corchetes. Si no buscar en internet plataforma + annotation + bioconductor GPL570: [HG-U133_Plus_2] Affymetrix Human Genome U133 Plus 2.0 Array
+
+```{r libraries}
+library(Biobase)
+library(hgu133plus2.db) # Este es el que hay que cambiar en función de la plataforma
+source("medianreps.R")
+library(stringr)
+```
+
+```{r load_data}
+load(file = "GSE_AR_annotated.RData")
+expressionset <- GSE[["GSE93272"]]
+```
+
+# Estandarización de la nomenclatura
+
+```{r estandarizacion}
+matriz <- exprs(expressionset)
+muestras <- pData(expressionset)
+
+muestras <- muestras[,c("gender:ch1", "disease state:ch1", "age:ch1", "batch:ch1")]
+colnames(muestras) <- c("Sex", "Diagnosis", "Age", "Batch")
+muestras$Age <- as.numeric(muestras$Age)
+muestras$Diagnosis <- sapply(muestras$Diagnosis, function(x) ifelse(str_detect(x, ".*control.*"), "Control", "RA"))
+muestras$Diagnosis <- as.factor(muestras$Diagnosis)
+muestras$Sex <- factor(muestras$Sex, levels = c("M", "F"), labels = c("Male", "Female"))
+muestras$Batch <- as.factor(muestras$Batch)
+```
+
+```{r diagnosis_sex}
+muestras$Diagnosis_Sex <- factor(paste(muestras$Diagnosis, muestras$Sex, sep = "_"))
+```
+
+# Anotación
+
+Si trabajamos con arrays, vamos a intentar usar el paquete de R para dicho array [GPL570 - Affymetrix Human Genome U133 Plus 2.0 Array Array](https://bioconductor.org/packages/release/data/annotation/html/illuminaHumanv2.db.html)
+
+```{r anotacion}
+probeid2ee <- select(hgu133plus2.db, keys = featureNames(expressionset), 
+                     columns = c("ENTREZID", "GENENAME", "SYMBOL"), keytype = "PROBEID")
+
+indices <- BiocGenerics::match(featureNames(expressionset), probeid2ee$PROBEID)
+
+fData(expressionset) <- probeid2ee[indices,]
+
+matriz <- exprs(expressionset)
+rownames(matriz) <- fData(expressionset)$ENTREZID
+matriz <- matriz[!is.na(rownames(matriz)),]
+
+matriz <- medianReps(matriz)
+
+indices <- BiocGenerics::match(rownames(matriz), fData(expressionset)$ENTREZID)
+
+ENTREZIDS <- fData(expressionset)$ENTREZID[indices]
+featuredata <- fData(expressionset)[indices,]
+```
+
+Ejemplo Biomart
+
+```{r}
+# ensembl <-  useMart("ENSEMBL_MART_ENSEMBL")
+#     # listDatasets(ensembl) # function to see which datasets are present in ensembl
+# ensembl <- useDataset("hsapiens_gene_ensembl", mart = ensembl)
+#     # listFilters(ensembl) # check which filters are available
+#     # listAttributes(ensembl) # check attributes are available to select
+# annot <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"),
+#                  filters = "affy_hg_u133_plus_2",
+#                  values = fData(expressionset)$SYMBOL,
+#                  mart = ensembl)
+```
+
+Vamos a sustituir la información original en el fichero GSE por la información actualizada y guardarlo en un nuevo fichero.
+
+```{r}
+# GSE update
+experimentData <- GSE$GSE93272@experimentData
+assayData <- matriz
+phenoData <- new("AnnotatedDataFrame", data = muestras, varMetadata = data.frame(labelDescription = rep(NA, ncol(muestras)), row.names = colnames(muestras)))
+annotation <- GSE$GSE93272@annotation
+featureData <- featuredata
+rownames(featureData) <- featureData$ENTREZID
+GSE93272n <- new("ExpressionSet", exprs= assayData, phenoData = phenoData, experimentData = experimentData, annotation = annotation, featureData = as(featureData, "AnnotatedDataFrame"))
+GSE$GSE93272 <- GSE93272n
+
+# Guardar
+save(GSE, file = "GSE_AR_annotated.RData")
+rm(assayData, experimentData, GSE93272n, phenoData, annotation)
+```

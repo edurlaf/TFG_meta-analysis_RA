@@ -1,0 +1,404 @@
+---
+title: "Descarga y normalización de datos"
+date: "3/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Librerías
+
+```{r library, message=FALSE}
+library(tidyverse)
+library(GEOquery)
+library(edgeR)
+```
+
+# Estudios
+
+Los estudios de los que vamos a descargar datos de GEO son:
+
+```{r estudios, message=FALSE}
+revision = read_tsv("../Data/revision_sistematica_RA.csv") %>%
+  filter(Inclusion == "Si")
+  
+revision$Estudio
+```
+
+-   **GSE117769** : Illumina HiSeq 2500
+-   **GSE93272** : Affymetrix Human Genome U133 Plus 2.0 Array
+-   **GSE17755** : Hitachisoft AceGene Human Oligo Chip 30K 1 Chip Version
+-   **GSE15573** : Illumina human-6 v2.0 expression beadchip
+-   **GSE110169** : Affymetrix Human Genome U219 Array
+-   **GSE97165** : Illumina HiSeq 2000
+-   **GSE89408** : Illumina HiSeq 2000
+
+# Descarga
+
+```{r download, message=FALSE, warning=FALSE, eval=FALSE}
+GSE <- lapply(revision$Estudio, function(x) getGEO(x)[[1]])
+names(GSE) <- revision$Estudio
+save(GSE, file = "../Data/GSE_AR.RData")
+```
+
+```{r load_rdata, message=FALSE, warning=FALSE, eval=TRUE}
+load("../Data/GSE_AR.RData")
+```
+
+# Exploracion de los datos
+
+Extraemos los datos fenotípicos de las muestras
+
+```{r message=FALSE, warning=FALSE}
+GSEdata <- lapply(GSE, pData)
+```
+
+Extraemos los datos de expresión
+
+```{r message=FALSE, warning=FALSE}
+GSEmat <- lapply(GSE, exprs)
+```
+
+## Características de las matrices de expresión
+
+Lo primero a revisar son las dimensiones de las matrices, para comprobar que hay datos en todas
+
+```{r message=FALSE, warning=FALSE}
+lapply(GSEmat, dim) #PROBLEMS
+```
+
+Hay que revisar los estudios cuyas dimensiones presentan 0 filas:
+
+-   **GSE117769**: Los datos crudos están disponibles en GEO, Illumina HiSeq 2500
+
+-   **GSE89408**: Los datos crudos están disponibles en GEO, Illumina HiSeq 2000
+
+Habrá que descargar los conteos crudos y normalizar los tres datasets (al final se descartó el tercero).
+
+También hay que cribar los datos de los siguientes estudios: GSE117769, GSE93272, GSE110169 y GSE89408 (todos menos el GSE15573).
+
+### GSE117769
+
+Leemos el archivo.
+
+```{r GSE117769_exploration, warning=FALSE}
+GSE117769_raw <- read_tsv("../Data/GSE117769_ra-counts-matrix-EnsembIDs-GRCh37.p10.txt")
+dim(GSE117769_raw)
+```
+
+Los nombres de las columnas (de las muestras) no coinciden con los datos de accesión del GSEdata, hay que consultar los datos de fenotipo: title y geoaccesion. Además, sólo interesan los datos de RA y healthy, no los de espondilitis ni los de psoriasis.
+
+```{r GSE117769_transformation, warning=FALSE}
+GSE117769_raw <- GSE117769_raw %>%
+  column_to_rownames(var="X1") # Convertimos los nombres de los genes en nombres de filas
+
+# Los nombres de las columnas deben coincidir con los que tenemos en el objeto GSEdata
+info <- GSEdata$GSE117769
+geoacc <- info$geo_accession
+names(geoacc) <- sapply(info$title, function(x) unlist(strsplit(x, ":"))[1])
+colnames(GSE117769_raw) <- geoacc[colnames(GSE117769_raw)]
+
+# Cribar: seleccionar los datos de RA y healthy (quitar spondilitis y psoriasis)
+# seleccionar muestras con fenotipo apropiado
+#phenos <- unique(info$`phenotype:ch1`); phenos
+phencl <- grep("phenotype", colnames(info))
+phenos <- unique(info[,phencl])[1:2]; phenos
+smpls <- grep(pattern = paste(phenos, collapse = "|"),info[,phencl])
+# Lo hacemos así para no asumir que están en el mismo orden, si no se podría hacer más simple con which directamente. Aquí estamos sacando los geo accession.
+geophe <- geoacc[smpls]
+GSE117769_raw <- GSE117769_raw[,which(colnames(GSE117769_raw) %in% geophe)]
+GSEdata$GSE117769 <- GSEdata$GSE117769[smpls,] 
+
+all(colnames(GSE117769_raw) == rownames(GSEdata$GSE117769))
+```
+
+Tras haber realizado el boxplot, PCA y clustering, se decide eliminar la muestra GSM3308533.
+
+```{r}
+smplcl <- which(colnames(GSE117769_raw) == 'GSM3308533')
+GSE117769_raw <- GSE117769_raw[,-smplcl]
+smplrw <- which(rownames(GSEdata$GSE117769) == 'GSM3308533')
+GSEdata$GSE117769 <- GSEdata$GSE117769[-smplrw,]
+```
+
+Vamos a normalizar la matriz de expresión resultante por el método TMM de edgeR
+
+```{r GSE117769_normalization, warning=FALSE, message=FALSE}
+GSE117769_exprs <- DGEList(counts = na.omit(GSE117769_raw), remove.zeros = TRUE,
+                           samples = GSEdata$GSE117769)
+rm(GSE117769_raw)
+
+keep <- edgeR::filterByExpr(GSE117769_exprs)
+GSE117769_exprs <- GSE117769_exprs[keep, ,keep.lib.size=TRUE]
+
+tmm <- calcNormFactors(GSE117769_exprs, method = "TMM")
+# Para determinar si usamos limma-voom o limma-trend:
+# max(tmm$samples$lib.size)/min(tmm$samples$lib.size) # 2.78 <  3, limma-trend
+
+norm_data <- cpm(tmm, normalized.lib.sizes = TRUE, log=TRUE)
+# Para que el rango empiece desde 0, sumaremos el minimo a cada valor.
+norm_data <- norm_data - min(norm_data)
+GSEmat$GSE117769 <- norm_data
+
+rm(GSE117769_exprs, norm_data, tmm, keep)
+```
+
+Vamos a sustituir la información original en el fichero GSE por la información actualizada y guardarlo en un archivo nuevo
+
+```{r GSE_update_117769}
+experimentData <- GSE$GSE117769@experimentData
+assayData <- GSEmat$GSE117769
+phenoData <- new("AnnotatedDataFrame", data = GSEdata$GSE117769, varMetadata = GSE$GSE117769@phenoData@varMetadata)
+annotation <- GSE$GSE117769@annotation
+
+GSE117769 <- new("ExpressionSet", exprs= assayData, phenoData = phenoData, experimentData = experimentData, annotation = annotation)
+
+GSE$GSE117769 <- GSE117769
+
+save(GSE, file = "../Data/GSE_AR_preprocessed.RData")
+rm(assayData, experimentData, GSE117769, phenoData, annotation)
+```
+
+### GSE89408
+
+Hay RAs de todo tipo, controles y OAs. Aunque va con el GSE97165, se ha decidido emplear sólo el GSE89408 para evitar posibles problemas de lotes. Nos quedaremos sólo con los controles y los RA. También habrá que asignar los geoaccesion a las muestras (ojo: los nombres en el archivo raw no coinciden con los pdata). Luego normalizaremos.
+
+```{r GSE89408, warning=FALSE}
+# Leer:
+GSE89408_raw <- read_tsv("../Data/GSE89408_GEO_count_matrix.txt")
+dim(GSE89408_raw)
+
+# Nombrar filas en base a genes
+GSE89408_raw <- GSE89408_raw %>% column_to_rownames(var="X1") 
+
+# Columnas GSE89408 según su geoaccession
+info <- pData(GSE$GSE89408)
+GSE89408_raw <- GSE89408_raw[,grep(pattern = "normal|RA", colnames(GSE89408_raw))]
+colnames(GSE89408_raw) <- gsub(pattern = "RA_tissue_", "rheumatoid arthritis tissue ", colnames(GSE89408_raw))
+colnames(GSE89408_raw) <- gsub(pattern = "normal_tissue_", "healthy tissue ", colnames(GSE89408_raw))
+geoac <- info$geo_accession; names(geoac) <- info$title
+colnames(GSE89408_raw) <- geoac[colnames(GSE89408_raw)]
+GSEdata$GSE89408 <- GSEdata$GSE89408[colnames(GSE89408_raw),]
+
+```
+
+Vamos a normalizar la matriz de expresión resultante por el método TMM de edgeR
+
+```{r GSEmix_normalization, warning=FALSE, message=FALSE}
+GSE89408_raw <- DGEList(counts = na.omit(GSE89408_raw), remove.zeros = TRUE, samples = GSEdata$GSE89408)
+#rm(GSEmix)
+keep <- edgeR::filterByExpr(GSE89408_raw)
+GSE89408_raw <- GSE89408_raw[keep, ,keep.lib.size=TRUE]
+
+tmm <- calcNormFactors(GSE89408_raw, method = "TMM")
+# Para determinar si usamos limma-voom o limma-trend:
+# max(tmm$samples$lib.size)/min(tmm$samples$lib.size) # 3.943748 > 3, limma-voom¿?
+norm_data <- cpm(tmm, normalized.lib.sizes = TRUE, log=TRUE)
+
+# Para que el rango empiece desde 0, sumaremos el minimo a cada valor.
+norm_data <- norm_data - min(norm_data)
+
+GSEmat$GSE89408 <- norm_data
+rm(GSE89408_raw, norm_data, tmm, keep)
+
+```
+
+Vamos a sustituir la información original en el fichero GSE por la información actualizada.
+
+```{r GSE_update_89408}
+experimentData <- GSE$GSE89408@experimentData
+assayData <- GSEmat$GSE89408
+phenoData <- new("AnnotatedDataFrame", data = GSEdata$GSE89408, varMetadata = GSE$GSE89408@phenoData@varMetadata)
+annotation <- GSE$GSE89408@annotation
+GSE89408 <- new("ExpressionSet", exprs= assayData, phenoData = phenoData, experimentData = experimentData, annotation = annotation)
+GSE$GSE89408 <- GSE89408
+
+save(GSE, file = "../Data/GSE_AR_preprocessed.RData")
+rm(assayData, experimentData, GSE89408, phenoData, annotation)
+
+```
+
+### GSE110169
+
+Vamos a seleccionar los controles y los RA, y además vamos a eliminar a los 5 individuos que no tienen sexo asignado.
+
+```{r}
+# Population data
+pdata <- GSEdata$GSE110169
+pdata <- pdata[grep(pattern = "Normal|RA", pdata$`disease:ch1`),]
+GSEdata$GSE110169 <- pdata[which(pdata$`Sex:ch1` != "N/A"),]
+
+# Expression data
+GSEmat$GSE110169 <- GSEmat$GSE110169[,GSEdata$GSE110169$geo_accession]
+
+```
+
+Vamos a sustituir la información original en el fichero GSE por la información actualizada.
+
+```{r}
+# GSE general
+experimentData <- GSE$GSE110169@experimentData
+assayData <- GSEmat$GSE110169
+phenoData <- new("AnnotatedDataFrame", data = GSEdata$GSE110169, varMetadata = GSE$GSE110169@phenoData@varMetadata)
+annotation <- GSE$GSE110169@annotation
+GSE110169 <- new("ExpressionSet", exprs= assayData, phenoData = phenoData, experimentData = experimentData, annotation = annotation)
+GSE$GSE110169 <- GSE110169
+
+# Guardar
+save(GSE, file = "../Data/GSE_AR_preprocessed.RData")
+rm(assayData, experimentData, GSE110169, phenoData, annotation)
+```
+
+### GSE93272
+
+```{r}
+# helper: clean format # en realidad no hacía falta, a partir de la columna 50 estaba en formato bueno
+cleanshit <- function(x){strsplit(as.character(x), split = ": ")[[1]][2]}
+
+# Population data
+pdata <- GSEdata$GSE93272
+
+# Select columns
+intrc <- c('characteristics_ch1', paste0('characteristics_ch1.',c(3,30:35)))
+colsi <- which(colnames(pdata) %in% intrc)
+pdatc <- pdata[, colsi]
+pdatc <- apply(pdatc, 2, function(x){sapply(x, cleanshit)})
+
+# Select duplicated ids
+ids <- pdatc[,1]
+idsdup <- unique(ids[which(duplicated(ids))])
+ndupl <- length(idsdup)
+
+# Non-duplicated ids
+idsndu <- setdiff(ids, idsdup)
+unsel <- rownames(pdatc)[which(ids %in% idsndu)]
+
+# Screening
+dupsel <- rep(NA, length(idsdup))
+for(i in 1:ndupl) {
+  thisid.data <- pdatc[which(ids == idsdup[i]),]
+  cond0d <- apply(thisid.data, 1, function(x) any(x[-c(1:2)] == "0"))
+  if(any(cond0d)){
+    if(length(which(cond0d)) == 1){
+      dupsel[i] <- rownames(thisid.data)[which(cond0d)]
+    } else {
+      dnew <- thisid.data[which(cond0d),]
+      condNA <- apply(dnew, 1, function(x) length(which(x[-c(1:2)] == "NA")) == 5)
+      if(length(which(condNA)) == 1){
+        dupsel[i] <- rownames(dnew)[which(condNA)]
+      } else {
+        dupsel[i] <- rownames(dnew[condNA,])[which(dnew[condNA,2] == "2")]
+      }}
+  } else {
+    dupsel[i] <- rownames(thisid.data)[which(thisid.data[,2] == "2")]
+  }
+}
+  
+thisisit <- pdatc[c(unsel, dupsel),]  
+yeah <- pdata[c(unsel, dupsel),]
+#yeah[,intrc] <- thisisit[,intrc]
+table(yeah$characteristics_ch1.6, yeah$characteristics_ch1.1)
+GSEdata$GSE93272 <- yeah
+matriz <- GSEmat$GSE93272
+matyea <- matriz[, c(unsel, dupsel)]
+GSEmat$GSE93272 <- matyea
+
+```
+
+Vamos a sustituir la información original en el fichero GSE por la información actualizada.
+
+```{r}
+# GSE general
+experimentData <- GSE$GSE93272@experimentData
+assayData <- GSEmat$GSE93272
+phenoData <- new("AnnotatedDataFrame", data = GSEdata$GSE93272, varMetadata = GSE$GSE93272@phenoData@varMetadata)
+annotation <- GSE$GSE93272@annotation
+GSE93272 <- new("ExpressionSet", exprs= assayData, phenoData = phenoData, experimentData = experimentData, annotation = annotation)
+GSE$GSE93272 <- GSE93272
+
+# Guardar
+save(GSE, file = "../Data/GSE_AR_preprocessed.RData")
+rm(assayData, experimentData, GSE93272, phenoData, annotation)
+```
+
+## Exploración de los valores
+
+```{r check_nas, message=FALSE, warning=FALSE}
+lapply(GSEmat, anyNA)
+```
+
+No tenemos NAs. En caso de que los hubiera, se usaría la función impute.knn del paquete impute para imputar los valores NA de las matrices.
+
+```{r impute_test}
+# test <- impute::impute.knn(GSEmat$GSE93272)
+# GSEmat$GSE93272 <- test$data
+
+```
+
+## Boxplot
+
+Listado de las normalizaciones utilizadas en cada dataset:
+
+-   **GSE117769** : raw counts (TMM)
+-   **GSE93272** : frozen robust multiarray analysis (fRMA) (MAS 5.0)
+-   **GSE15573** : quantile normalisation with Beadstudio
+-   **GSE110169** : Robust Multi-Array Average (RMA)
+-   **GSE89408)** : raw counts (TMM)
+
+```{r rango}
+lapply(GSEmat, range)
+```
+
+```{r message=FALSE, warning=FALSE}
+#GSEmat <- GSEmat[-c(6,7)]
+for (e in names(GSEmat)) {
+  print (e)
+  boxplot(GSEmat[[e]])
+  }
+```
+
+## GSE15573
+
+El GSE15573 no ha aplicado la transformación logarítmica, así que tendremos que aplicarlo nosotros
+
+```{r log_test, message=FALSE, warning=FALSE}
+
+GSEmat$GSE15573 <- log2(GSEmat$GSE15573+1)
+
+
+for (e in names(GSEmat)) {
+  print (e)
+  boxplot(GSEmat[[e]])
+  }
+```
+
+Tras hacer una revisión del análisis exploratorio, hemos decidido descartar el siguiente estudio:
+
+**GSE17755**
+
+-   Se trata de un array comparativo de dos colores
+-   Tiene gran cantidad de valores NA (más del 50% de los valores)
+-   La normalización centra la mediana de todas las muestras en 0 con una distribución de entre -15 y +15
+
+```{r final_selection}
+for (i in c(1:length(GSE))) {
+  experimentData <- GSE[[i]]@experimentData
+  assayData <- GSEmat[[i]]
+  phenoData <- new("AnnotatedDataFrame", data = GSEdata[[i]], varMetadata = GSE[[i]]@phenoData@varMetadata)
+  annotation <- GSE[[i]]@annotation
+
+  new_gse <- new("ExpressionSet", exprs= assayData, phenoData = phenoData, experimentData = experimentData, annotation = annotation)
+
+  GSE[[i]] <- new_gse
+}
+rm(assayData, experimentData, new_gse, phenoData, annotation)
+
+
+save(GSE, file = "../Data/GSE_AR_final_selection.RData")
+```
+
+# Estandarización y selección de muestras
+
+La nomenclatura de los metadatos no está estandarizada y varía entre estudios. Por ello, es necesario estandarizarla para que los análisis downstream puedan ser más automáticos. Además, durante el análisis exploratorio detectamos varios estudios que tienen muestras que debemos descartar, generalmente porque son muestras que no pertenecen a la enfermedad objetivo de estudio, es decir, la AR. Esta parte se hizo para cada estudio individual.
